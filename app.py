@@ -58,6 +58,10 @@ def preprocess_text(text):
     return ' '.join(tokens)
 
 # ─── Model Manager ────────────────────────────────────────────────────────────
+# Lokasi file cache model (disimpan di dalam repo agar persisten di Streamlit Cloud)
+MODEL_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model_cache')
+MODEL_CACHE_FILE = os.path.join(MODEL_CACHE_DIR, 'sentiment_model.pkl')
+
 class SentimentModel:
     def __init__(self):
         self.vectorizer = None
@@ -70,22 +74,70 @@ class SentimentModel:
             'negatif': 'Negatif 😞',
             'netral': 'Netral 😐'
         }
-    
-    def train(self, data_path='data/dataset.csv'):
-        """Train semua model dari dataset"""
+
+    # ── Persistensi ───────────────────────────────────────────────────────────
+
+    def save(self, path=MODEL_CACHE_FILE):
+        """Simpan model yang sudah dilatih ke file .pkl"""
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            payload = {
+                'vectorizer': self.vectorizer,
+                'models': self.models,
+                'training_stats': self.training_stats,
+            }
+            with open(path, 'wb') as f:
+                pickle.dump(payload, f)
+            print(f"[INFO] Model disimpan ke {path}")
+            return True
+        except Exception as e:
+            print(f"[WARNING] Gagal menyimpan model: {e}")
+            return False
+
+    def load(self, path=MODEL_CACHE_FILE):
+        """Muat model dari file .pkl jika tersedia. Return True jika berhasil."""
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, 'rb') as f:
+                payload = pickle.load(f)
+            self.vectorizer = payload['vectorizer']
+            self.models = payload['models']
+            self.training_stats = payload['training_stats']
+            self.is_trained = True
+            print(f"[INFO] Model dimuat dari cache: {path}")
+            return True
+        except Exception as e:
+            print(f"[WARNING] Gagal memuat model cache: {e}")
+            return False
+
+    # ── Training ──────────────────────────────────────────────────────────────
+
+    def train(self, data_path='data/dataset.csv', force=False):
+        """
+        Train semua model dari dataset.
+
+        Args:
+            data_path: Path ke file CSV dataset.
+            force: Jika True, paksa training ulang meski cache sudah ada.
+        """
+        # Coba muat dari cache terlebih dahulu (kecuali force=True)
+        if not force and self.load():
+            return True, "Model dimuat dari cache (tidak perlu training ulang)."
+
         try:
             df = pd.read_csv(data_path)
             df = df.dropna()
             df['text_clean'] = df['text'].apply(preprocess_text)
             df = df[df['text_clean'].str.len() > 0]
-            
+
             X = df['text_clean']
             y = df['label']
-            
+
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=0.2, random_state=42, stratify=y
             )
-            
+
             # TF-IDF Vectorizer
             self.vectorizer = TfidfVectorizer(
                 ngram_range=(1, 2),
@@ -95,14 +147,14 @@ class SentimentModel:
             )
             X_train_vec = self.vectorizer.fit_transform(X_train)
             X_test_vec = self.vectorizer.transform(X_test)
-            
+
             # Train 3 model
             classifiers = {
                 'naive_bayes': MultinomialNB(alpha=0.5),
                 'logistic_regression': LogisticRegression(max_iter=1000, C=1.0),
                 'svm': LinearSVC(max_iter=2000, C=1.0)
             }
-            
+
             stats = {}
             for name, clf in classifiers.items():
                 clf.fit(X_train_vec, y_train)
@@ -110,7 +162,7 @@ class SentimentModel:
                 acc = accuracy_score(y_test, y_pred)
                 report = classification_report(y_test, y_pred, output_dict=True)
                 cm = confusion_matrix(y_test, y_pred, labels=['positif', 'negatif', 'netral'])
-                
+
                 self.models[name] = clf
                 stats[name] = {
                     'accuracy': round(acc * 100, 2),
@@ -118,7 +170,7 @@ class SentimentModel:
                     'confusion_matrix': cm.tolist(),
                     'labels': ['positif', 'negatif', 'netral']
                 }
-            
+
             # Dataset stats
             self.training_stats = {
                 'models': stats,
@@ -129,10 +181,14 @@ class SentimentModel:
                     'distribution': df['label'].value_counts().to_dict()
                 }
             }
-            
+
             self.is_trained = True
-            return True, "Model berhasil dilatih!"
-        
+
+            # Simpan hasil training ke cache
+            self.save()
+
+            return True, "Model berhasil dilatih dan disimpan ke cache!"
+
         except Exception as e:
             return False, str(e)
     
@@ -314,7 +370,8 @@ def get_models():
 def train():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(base_dir, 'data', 'dataset.csv')
-    success, msg = sentiment_model.train(data_path)
+    # force=True → selalu latih ulang dari data, tidak pakai cache lama
+    success, msg = sentiment_model.train(data_path, force=True)
     if success:
         return jsonify({'success': True, 'message': msg})
     else:
